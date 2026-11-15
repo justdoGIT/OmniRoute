@@ -1,0 +1,61 @@
+name: Sync Upstream Repository
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync-upstream:
+    name: Sync Main & Active Release Branches with Upstream
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git Identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Setup Upstream Remote
+        run: |
+          git remote add upstream https://github.com/cheaper-inference/OmniRoute.git || git remote set-url upstream https://github.com/cheaper-inference/OmniRoute.git
+          git fetch upstream --prune
+
+      - name: Sync Main and Release Branches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for BRANCH in main $(git for-each-ref --format='%(refname:lstrip=3)' 'refs/remotes/upstream/release/v*'); do
+            if ! git show-ref --verify --quiet "refs/remotes/upstream/${BRANCH}"; then
+              continue
+            fi
+            if git show-ref --verify --quiet "refs/remotes/origin/${BRANCH}"; then
+              git checkout -B "${BRANCH}" "origin/${BRANCH}"
+              if git merge-base --is-ancestor "upstream/${BRANCH}" HEAD; then
+                echo "${BRANCH} is already up to date with upstream/${BRANCH}"
+                continue
+              fi
+              git merge "upstream/${BRANCH}" -m "chore(sync): merge upstream/${BRANCH} into ${BRANCH}"
+            else
+              git checkout -B "${BRANCH}" "upstream/${BRANCH}"
+            fi
+
+            if ! git push origin "${BRANCH}"; then
+              SAFE_NAME=$(echo "${BRANCH}" | tr '/' '-')
+              SYNC_BRANCH="chore/sync-upstream-${SAFE_NAME}"
+              git push origin "HEAD:refs/heads/${SYNC_BRANCH}" --force
+              PR_URL=$(gh pr list --head "${SYNC_BRANCH}" --base "${BRANCH}" --json url --jq '.[0].url // empty')
+              if [ -z "${PR_URL}" ]; then
+                PR_URL=$(gh pr create --base "${BRANCH}" --head "${SYNC_BRANCH}" --title "chore(sync): merge upstream/${BRANCH} into ${BRANCH}" --body "Automated periodic sync of \`${BRANCH}\` with \`cheaper-inference/OmniRoute\`.")
+              fi
+              gh pr merge "${PR_URL}" --merge --delete-branch || gh pr merge "${PR_URL}" --auto --merge --delete-branch || true
+            fi
+          done
